@@ -1,4 +1,6 @@
 # ---------------- IMPORTACIONES ----------------
+from flask import Flask
+from threading import Thread
 import os
 import discord
 from discord import app_commands
@@ -469,5 +471,18 @@ async def usar_plantilla(interaction: discord.Interaction, nombre: str):
     else:
         await interaction.response.send_message("❌ No se encontró la plantilla", ephemeral=True)
 
+app = Flask("")
+@app.route("/")
+def ping():
+    return "Bot activo ✅"
 
+def run_web():
+    app.run(host="0.0.0.0", port=10000)  # Puerto obligatorio en Render
+
+def mantener_encendido():
+    t = Thread(target=run_web, daemon=True)
+    t.start()
+
+# --- LLÁMALO JUSTO ANTES DE bot.run() ---
+mantener_encendido()
 bot.run(TOKEN)
