@@ -1,3 +1,4 @@
+# ---------------- IMPORTACIONES ----------------
 import os
 import discord
 from discord import app_commands
@@ -7,23 +8,19 @@ import sqlite3
 from datetime import datetime
 import pytz
 
-# ---------------- CONFIGURACIÓN ----------------
-TOKEN = os.getenv("TOKEN")  # Se lee desde Render, no lo pongas aquí
-MI_SERVIDOR_ID = 1406902399968481422  # Pon tu ID de servidor
-ROL_MODERADOR_ID = 1518449563915124887  # Pon tu ID de rol de moderador
+# ---------------- ⚠️ CONFIGURA ESTO ⚠️ ----------------
+TOKEN = os.getenv("TOKEN")
+MI_SERVIDOR_ID = 1406902399968481422       # Pon tu ID de servidor
+ROL_MODERADOR_ID = 1518449563915124887     # Pon tu ID de rol moderador
 
-# ⏱️ Zona horaria: Albion Online usa UTC
 TIMEZONE = pytz.timezone("UTC")
 RECORDATORIOS = [60, 15]
 
-# 📢 Mensaje de anuncio
-PING_ANUNCIO = "@everyone 📢 ¡Nuevo ping de Ava! Revisa las inscripciones 👇"
-
-# 📌 Pie de página
+PING_ANUNCIO = "<@&1419881877287997542> 📢 ¡Nuevo ping de ava! Revisa las inscripciones 👇"
 TEXTO_PIE = "© Misa Amane | Sistema de eventos oficial"
 URL_ICONO_PIE = None
 
-# 🎯 Roles
+# 🎯 Tus roles y emojis
 ROLES_ALBION = {
     "Caller": (discord.PartialEmoji(name="caller", id=1518950627047243909), 1),
     "Off-Tank": (discord.PartialEmoji(name="offtank", id=1518950734408716369), 1),
@@ -43,7 +40,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 def init_db():
-    conn = sqlite3.connect("eventos_bot.db")
+    db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS plantillas
                  (nombre TEXT PRIMARY KEY, datos TEXT)''')
@@ -52,6 +50,7 @@ def init_db():
                   mensaje_id INTEGER, titulo TEXT, fecha TEXT, hora TEXT,
                   fecha_hora TEXT, descripcion TEXT, imagen_url TEXT,
                   roles TEXT, suplentes TEXT, recordatorios_enviados TEXT DEFAULT '',
+                  estado TEXT DEFAULT 'activo',  -- Nuevo campo para saber si está cancelado
                   canal_id INTEGER, creador_id INTEGER)''')
     conn.commit()
     conn.close()
@@ -72,13 +71,14 @@ def tiempo_restante(fecha_evento):
 
 @tasks.loop(minutes=1)
 async def actualizar_eventos():
-    conn = sqlite3.connect("eventos_bot.db")
+    db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("SELECT * FROM eventos")
+    c.execute("SELECT * FROM eventos WHERE estado = 'activo'")
     eventos = c.fetchall()
     for ev in eventos:
         try:
-            ev_id, msg_id, titulo, fecha, hora, fecha_hora_str, desc, img, roles_str, suplentes_str, rec_str, canal_id, creador_id = ev
+            ev_id, msg_id, titulo, fecha, hora, fecha_hora_str, desc, img, roles_str, suplentes_str, rec_str, estado, canal_id, creador_id = ev
             fecha_hora = datetime.fromisoformat(fecha_hora_str).replace(tzinfo=TIMEZONE)
             rec_enviados = list(map(int, rec_str.split(","))) if rec_str else []
 
@@ -255,7 +255,8 @@ class BotonGestionar(Button):
                         except:
                             pass
 
-                    conn = sqlite3.connect("eventos_bot.db")
+                    db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+                    conn = sqlite3.connect(db_path)
                     c = conn.cursor()
                     c.execute("UPDATE eventos SET roles=?, suplentes=? WHERE mensaje_id=?",
                               (str(self.datos["roles"]), str(self.datos["suplentes"]), inter.message.id))
@@ -270,6 +271,51 @@ class BotonGestionar(Button):
         vista = View(timeout=60)
         vista.add_item(MenuExpulsar(self.datos))
         await i.response.send_message("📋 **Lista de participantes**\nElige a quien quieras quitar:", view=vista, ephemeral=True)
+
+
+# ✅ NUEVO BOTÓN: CALL OUT
+class BotonCallOut(Button):
+    def __init__(self, datos):
+        super().__init__(label="Call Out", style=discord.ButtonStyle.danger, emoji="🚫")
+        self.datos = datos
+
+    async def callback(self, i: discord.Interaction):
+        # Solo moderadores
+        if not any(role.id == ROL_MODERADOR_ID for role in i.user.roles):
+            return await i.response.send_message("❌ Solo moderadores pueden cancelar eventos", ephemeral=True)
+
+        embed = i.message.embeds[0]
+        embed.title = f"❌ EVENTO CANCELADO | {embed.title}"
+        embed.description = f"""
+📅 **Fecha:** {embed.description.split('**Fecha:**')[1].split('**Hora:**')[0].strip()}
+🕒 **Hora:** {embed.description.split('**Hora:**')[1].split('**Detalles:**')[0].strip()}
+
+⚠️ **MOTIVO:** Cancelado por falta de participantes o decisión de organización.
+
+📝 **Detalles:**
+{embed.description.split('**Detalles:**')[1].strip()}
+"""
+        embed.clear_fields()
+        embed.add_field(name="❌ Estado", value="Este evento ha sido cerrado y ya no se aceptan inscripciones.", inline=False)
+        embed.color = discord.Color.red()
+
+        # Desactivar todos los botones
+        vista_desactivada = View()
+        for item in i.message.components[0].children:
+            item.disabled = True
+            vista_desactivada.add_item(item)
+
+        await i.message.edit(embed=embed, view=vista_desactivada)
+
+        # Guardar como cancelado en la base de datos
+        db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("UPDATE eventos SET estado = 'cancelado', recordatorios_enviados = 'todos' WHERE mensaje_id = ?", (i.message.id,))
+        conn.commit()
+        conn.close()
+
+        await i.response.send_message("✅ Evento cancelado y cerrado correctamente", ephemeral=True)
 
 
 async def actualizar_visual(interaction, datos):
@@ -300,15 +346,18 @@ async def actualizar_visual(interaction, datos):
 
         embed.set_footer(text=TEXTO_PIE, icon_url=URL_ICONO_PIE)
 
+        # ✅ Agregamos el nuevo botón aquí
         vista = View(timeout=None)
         vista.add_item(SeleccionRol(datos))
         vista.add_item(BotonBanquillo(datos))
         vista.add_item(BotonCancelar(datos))
         vista.add_item(BotonGestionar(datos))
+        vista.add_item(BotonCallOut(datos))  # Nuevo botón
 
         await msg.edit(embed=embed, view=vista)
 
-        conn = sqlite3.connect("eventos_bot.db")
+        db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+        conn = sqlite3.connect(db_path)
         c = conn.cursor()
         c.execute("UPDATE eventos SET roles=?, suplentes=? WHERE mensaje_id=?",
                   (str(datos["roles"]), str(datos["suplentes"]), msg.id))
@@ -319,7 +368,7 @@ async def actualizar_visual(interaction, datos):
         print(f"Error actualizando visual: {e}")
 
 
-# ---------------- EVENTOS Y COMANDOS ----------------
+# ---------------- INICIO DEL BOT ----------------
 @bot.event
 async def on_ready():
     guild = discord.Object(id=MI_SERVIDOR_ID)
@@ -327,7 +376,6 @@ async def on_ready():
     print(f"✅ Bot conectado: {bot.user}")
     print("✅ Comandos sincronizados | Zona horaria: UTC")
 
-    # Estado personalizado
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
@@ -377,16 +425,18 @@ async def crear_evento(interaction: discord.Interaction, titulo: str, fecha: str
     vista.add_item(BotonBanquillo(datos))
     vista.add_item(BotonCancelar(datos))
     vista.add_item(BotonGestionar(datos))
+    vista.add_item(BotonCallOut(datos))  # Nuevo botón en eventos nuevos
 
     await interaction.channel.send(PING_ANUNCIO)
     msg = await interaction.channel.send(embed=embed, view=vista)
     await interaction.response.send_message("✅ Evento creado correctamente", ephemeral=True)
 
     try:
-        conn = sqlite3.connect("eventos_bot.db")
+        db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+        conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        c.execute("INSERT INTO eventos (mensaje_id, titulo, fecha, hora, fecha_hora, descripcion, imagen_url, roles, suplentes, recordatorios_enviados, canal_id, creador_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (msg.id, titulo, fecha, hora, fecha_hora.isoformat(), descripcion, imagen, str(datos["roles"]), str(datos["suplentes"]), "", interaction.channel.id, interaction.user.id))
+        c.execute("INSERT INTO eventos (mensaje_id, titulo, fecha, hora, fecha_hora, descripcion, imagen_url, roles, suplentes, recordatorios_enviados, estado, canal_id, creador_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  (msg.id, titulo, fecha, hora, fecha_hora.isoformat(), descripcion, imagen, str(datos["roles"]), str(datos["suplentes"]), "", "activo", interaction.channel.id, interaction.user.id))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -395,18 +445,9 @@ async def crear_evento(interaction: discord.Interaction, titulo: str, fecha: str
 
 @tree.command(name="guardar_plantilla", description="Guardar configuración de roles")
 async def guardar_plantilla(interaction: discord.Interaction, nombre: str):
-def init_db():
-    db_path = os.path.join(os.path.dirname(_file_), "eventos_bot.db")
+    db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS plantillas
-                 (nombre TEXT PRIMARY KEY, datos TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS eventos
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  mensaje_id INTEGER, titulo TEXT, fecha TEXT, hora TEXT,
-                  fecha_hora TEXT, descripcion TEXT, imagen_url TEXT,
-                  roles TEXT, suplentes TEXT, recordatorios_enviados TEXT DEFAULT '',
-                  canal_id INTEGER, creador_id INTEGER)''')
     c.execute("INSERT OR REPLACE INTO plantillas VALUES (?, ?)", (nombre.lower(), str(ROLES_ALBION)))
     conn.commit()
     conn.close()
@@ -415,7 +456,8 @@ def init_db():
 
 @tree.command(name="usar_plantilla", description="Cargar plantilla de roles")
 async def usar_plantilla(interaction: discord.Interaction, nombre: str):
-    conn = sqlite3.connect("eventos_bot.db")
+    db_path = os.path.join(os.path.dirname(__file__), "eventos_bot.db")
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("SELECT datos FROM plantillas WHERE nombre=?", (nombre.lower(),))
     res = c.fetchone()
