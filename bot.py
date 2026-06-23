@@ -395,7 +395,9 @@ async def crear_evento(interaction: discord.Interaction, titulo: str, fecha: str
 
 @tree.command(name="guardar_plantilla", description="Guardar configuración de roles")
 async def guardar_plantilla(interaction: discord.Interaction, nombre: str):
-    conn = sqlite3.connect("eventos_bot.db")
+import os
+db_path = os.path.join(os.path.dirname(_file_), "eventos_bot.db")
+conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO plantillas VALUES (?, ?)", (nombre.lower(), str(ROLES_ALBION)))
     conn.commit()
